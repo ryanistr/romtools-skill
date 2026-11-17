@@ -82,6 +82,10 @@ function safeProject(name) {
   return n;
 }
 
+function safeName(name) {
+  return /^[A-Za-z0-9._@+-]+$/.test(String(name || '')) ? String(name) : null;
+}
+
 function lineCount(file) {
   if (!fs.existsSync(file)) return null;
   const s = fs.readFileSync(file, 'utf8');
@@ -172,6 +176,7 @@ const INSTRUCTIONS = [
   'Use romtools_find_project / romtools_list_projects to resolve vague project names and ASK the user when ambiguous.',
   'Use romtools_find_script / romtools_list_scripts before running any custom script.',
   'repack_partition and unpack_image execute RomTools functions and enforce the rules: explicit project/fs, output only in <root>/output, autogen-first, and added-only context checks.',
+  'unpack_boot_image and repack_boot_image handle boot images; repack is SIGNED-ONLY unless the user explicitly asks for unsigned (allow_unsigned).',
   'Always tell the user the full absolute output path returned by a repack. Follow the romtools SKILL for all remaining policy.'
 ].join(' ');
 
@@ -284,6 +289,40 @@ const TOOLS = [
     name: 'list_binaries',
     description: 'List the executable utilities shipped in tool/bin (mkfs.erofs, extract.erofs, gen_fs-config, bbootimg.jar, etc.).',
     inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'list_boot_images',
+    description: 'List boot image build trees under <project>/boot and whether each still contains its <name>.img (required for repack).',
+    inputSchema: {
+      type: 'object',
+      properties: { project: { type: 'string' } },
+      required: ['project']
+    }
+  },
+  {
+    name: 'unpack_boot_image',
+    description: 'Unpack a boot/vendor_boot/recovery image from input/ into <project>/boot/<name> using bbootimg.jar. Refuses to overwrite an existing tree or a leftover build/ dir. Source image in input/ is preserved.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string' },
+        image: { type: 'string', description: 'Image filename in input/, with or without .img' }
+      },
+      required: ['project', 'image']
+    }
+  },
+  {
+    name: 'repack_boot_image',
+    description: 'Repack a boot image tree with bbootimg.jar. SIGNED output only by default: if only an unsigned image is produced it is removed and an error is returned. Set allow_unsigned=true ONLY when the user explicitly requested unsigned. Returns the full output path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string' },
+        name: { type: 'string', description: 'Folder name under <project>/boot, e.g. boot or vendor_boot' },
+        allow_unsigned: { type: 'boolean', description: 'Default false. Only true if the user explicitly asked for unsigned.' }
+      },
+      required: ['project', 'name']
+    }
   }
 ];
 
@@ -528,6 +567,114 @@ function handle(name, args) {
     case 'list_binaries': {
       const dir = path.join(need(), 'tool', 'bin');
       return { root: r, dir, binaries: fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile()).map(e => e.name).sort() };
+    }
+    case 'list_boot_images': {
+      const rootPath = need();
+      const project = resolveProjectStrict(rootPath, args.project);
+      const dir = path.join(rootPath, 'ROM_WORKDIR', project, 'boot');
+      return {
+        root: rootPath, project, dir,
+        images: dirsUnder(dir).map(n => ({ name: n, has_image: fs.existsSync(path.join(dir, n, n + '.img')) }))
+      };
+    }
+    case 'unpack_boot_image': {
+      const rootPath = need();
+      const project = resolveProjectStrict(rootPath, args.project);
+      const image = String(args.image || '').replace(/\.img$/, '');
+      if (!safeName(image)) throw new Error('invalid image name');
+      const src = path.join(rootPath, 'input', image + '.img');
+      if (!fs.existsSync(src)) throw new Error('image not found: ' + src);
+      const uboot = path.join(rootPath, 'ROM_WORKDIR', project, 'boot');
+      const target = path.join(uboot, image);
+      if (fs.existsSync(target)) throw new Error('refusing to overwrite existing boot tree: ' + target);
+      const abie = path.join(rootPath, 'tool', 'bin', 'booteditor');
+      if (fs.existsSync(path.join(abie, 'build'))) throw new Error('leftover build/ in ' + abie + ' — resolve it first, do not delete blindly');
+      if (fs.existsSync(path.join(abie, image + '.img'))) throw new Error('leftover ' + image + '.img in ' + abie);
+      const script = [
+        'set -o pipefail',
+        'cd "$ABIE" || exit 1',
+        'VBMETA_MOVED=0',
+        "trap 'if [[ \"$VBMETA_MOVED\" == 1 && -f \"$ABIE/vbmeta.img\" ]]; then mv -f \"$ABIE/vbmeta.img\" \"$ROOT/input/vbmeta.img\"; fi; rm -rf \"$ABIE/build\"; rm -f \"$ABIE/$IMAGE.img\"' EXIT",
+        'if [[ "$IMAGE" != "vbmeta" && -f "$ROOT/input/vbmeta.img" ]]; then mv "$ROOT/input/vbmeta.img" "$ABIE/vbmeta.img"; VBMETA_MOVED=1; fi',
+        'cp "$ROOT/input/$IMAGE.img" "$ABIE/$IMAGE.img" || exit 1',
+        'java -jar "$ABIE/bbootimg/bbootimg.jar" unpack 2>&1 || exit 1',
+        'if [[ ! -d "$ABIE/build" ]]; then echo "ERROR: bbootimg did not create build/"; exit 1; fi',
+        'mv "$ABIE/$IMAGE.img" "$ABIE/build/"',
+        'mv "$ABIE/build" "$UBOOT/$IMAGE"',
+        'echo "ROMTOOLS_UNPACK=$UBOOT/$IMAGE"'
+      ].join('\n');
+      const out = runBash(rootPath, script, {
+        ROOT: rootPath, ABIE: abie, UBOOT: uboot, IMAGE: image
+      });
+      return {
+        success: fs.existsSync(target),
+        project, image, unpacked_dir: target,
+        source_image_preserved: fs.existsSync(src),
+        tail: tailLines(out, 12)
+      };
+    }
+    case 'repack_boot_image': {
+      const rootPath = need();
+      const project = resolveProjectStrict(rootPath, args.project);
+      const name = safeName(args.name);
+      if (!name) throw new Error('invalid boot image name');
+      const uboot = path.join(rootPath, 'ROM_WORKDIR', project, 'boot');
+      const tree = path.join(uboot, name);
+      if (!fs.existsSync(tree)) throw new Error('no boot build tree at ' + tree);
+      const imageFile = path.join(tree, name + '.img');
+      if (!fs.existsSync(imageFile)) throw new Error('missing ' + imageFile + ' inside the build tree');
+      const abie = path.join(rootPath, 'tool', 'bin', 'booteditor');
+      const dirout = path.join(rootPath, 'output');
+      if (fs.existsSync(path.join(abie, 'build'))) throw new Error('leftover build/ in ' + abie + ' — resolve it first, do not delete blindly');
+      if (fs.existsSync(path.join(abie, name + '.img'))) throw new Error('leftover ' + name + '.img in ' + abie);
+      let vbOrigin = null;
+      if (name !== 'vbmeta' && fs.existsSync(path.join(rootPath, 'input', 'vbmeta.img'))) {
+        vbOrigin = path.join(rootPath, 'input', 'vbmeta.img');
+      } else if (name !== 'vbmeta' && fs.existsSync(path.join(uboot, 'vbmeta', 'vbmeta.img'))) {
+        vbOrigin = path.join(uboot, 'vbmeta', 'vbmeta.img');
+      }
+      const script = [
+        'set -o pipefail',
+        'cd "$ABIE" || exit 1',
+        'VBMETA_MOVED=0',
+        'RESTORED=0',
+        "trap 'if [[ \"$VBMETA_MOVED\" == 1 && -f \"$ABIE/vbmeta.img\" ]]; then mv -f \"$ABIE/vbmeta.img\" \"$VBORIG\"; fi; if [[ \"$RESTORED\" == 0 ]]; then if [[ -d \"$ABIE/build\" ]]; then mv -f \"$ABIE/build\" \"$UBOOT/$NAME\"; fi; if [[ -f \"$ABIE/$NAME.img\" && -d \"$UBOOT/$NAME\" ]]; then mv -f \"$ABIE/$NAME.img\" \"$UBOOT/$NAME/$NAME.img\"; fi; fi' EXIT",
+        'if [[ -n "$VBORIG" ]]; then mv "$VBORIG" "$ABIE/vbmeta.img"; VBMETA_MOVED=1; fi',
+        'mv "$UBOOT/$NAME/$NAME.img" "$ABIE/$NAME.img" || exit 1',
+        'mv "$UBOOT/$NAME" "$ABIE/build" || exit 1',
+        'java -jar "$ABIE/bbootimg/bbootimg.jar" pack 2>&1 || exit 1',
+        'mv "$ABIE/$NAME.img" "$ABIE/build"',
+        'mv "$ABIE/build" "$UBOOT/$NAME"',
+        'RESTORED=1',
+        'SIGNED=0',
+        'OUT=""',
+        'if [[ -f "$ABIE/$NAME.img.signed" ]]; then mv "$ABIE/$NAME.img.signed" "$DIROUT/$NAME.signed.img"; SIGNED=1; OUT="$DIROUT/$NAME.signed.img"',
+        'elif [[ -f "$ABIE/$NAME.img.clear" ]]; then mv "$ABIE/$NAME.img.clear" "$DIROUT/$NAME.unsigned.img"; OUT="$DIROUT/$NAME.unsigned.img"; fi',
+        'echo "ROMTOOLS_SIGNED=$SIGNED"',
+        'echo "ROMTOOLS_OUTPUT=$OUT"'
+      ].join('\n');
+      const out = runBash(rootPath, script, {
+        ROOT: rootPath, ABIE: abie, UBOOT: uboot, DIROUT: dirout,
+        NAME: name, VBORIG: vbOrigin || ''
+      });
+      const sm = out.match(/ROMTOOLS_SIGNED=(\d)/);
+      const om = out.match(/ROMTOOLS_OUTPUT=(.*)/);
+      const signed = sm ? sm[1] === '1' : false;
+      const output = om ? om[1].trim() : '';
+      if (!signed && !args.allow_unsigned) {
+        if (output && fs.existsSync(output)) fs.unlinkSync(output);
+        throw new Error(
+          'boot repack produced only an UNSIGNED image; removed it. ' +
+          'Ask the user — build unsigned only if they explicitly requested it ' +
+          '(then pass allow_unsigned=true). tail: ' + tailLines(out, 6).join(' | ')
+        );
+      }
+      return {
+        success: !!output && fs.existsSync(output),
+        project, name, signed, output,
+        output_size: output && fs.existsSync(output) ? fs.statSync(output).size : null,
+        tail: tailLines(out, 12)
+      };
     }
     default:
       throw new Error('Unknown tool: ' + name);

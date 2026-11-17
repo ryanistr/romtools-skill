@@ -31,6 +31,9 @@ Discovery / config tools:
 Execution tools:
 - `romtools_repack_partition({project, partition, fs, compression?, legacy?})` — runs the correct repack function, sets `DIROUT` to `<root>/output`, autogen-first, and returns `output` (full path), `autogen_added_file_contexts`, `autogen_added_fs_config` and `missing_contexts`. Requires explicit `fs`; validates project/partition and compression before running.
 - `romtools_unpack_image({project, image, fs?})` — detects fs with `blkid` if omitted, refuses to overwrite an existing tree, returns `unpacked_dir`.
+- `romtools_list_boot_images({project})` — boot build trees and whether each contains its `<name>.img`.
+- `romtools_unpack_boot_image({project, image})` — non-interactive bbootimg unpack into `<project>/boot/<name>`; preserves the source image and restores vbmeta.
+- `romtools_repack_boot_image({project, name})` — non-interactive bbootimg pack, **signed by default**; an unsigned-only result is removed and reported as an error. Set `allow_unsigned: true` only if the user explicitly asked for unsigned.
 
 The MCP enforces the mechanical rules (explicit project/fs, output only in `output/`, autogen-first, added-only context checks). This skill still supplies the **judgement** rules: ask on ambiguity, signed boot images, cleanup, and reporting the full output path. Never treat an MCP failure as permission to skip a rule — fall back to the documented shell flow and keep the same rules.
 
@@ -220,7 +223,7 @@ tool/bin/mkfs.erofs -z<compression> -T <epoch> --workers=$usable_threads \
 
 Source images: put `<name>.img` (boot, vendor_boot, recovery, dtbo, vbmeta) in `input/`. Unpacked trees: `$u_bootdir/<name>/` = `ROM_WORKDIR/<project>/boot/<name>/`. Packed output: `$DIROUT/<name>.signed.img` or `<name>.unsigned.img`.
 
-Interactive: main menu `0` → `1` Repack Image / `2` Unpack Image. Functions `unpack_bootimg` / `repack_bootimg` wrap `java -jar tool/bin/booteditor/bbootimg/bbootimg.jar unpack|pack`.
+Interactive: main menu `0` → `1` Repack Image / `2` Unpack Image. Functions `unpack_bootimg` / `repack_bootimg` wrap `java -jar tool/bin/booteditor/bbootimg/bbootimg.jar unpack|pack`. With the MCP, use `romtools_list_boot_images`, `romtools_unpack_boot_image` and `romtools_repack_boot_image` instead — they are non-interactive and carry the same signed-only rule.
 
 ```bash
 cd /mnt/project/RomTools && source tool/functions
@@ -251,7 +254,7 @@ After running:
 
 - [ ] Exactly one new `.img` in `/mnt/project/RomTools/output`, named `<partition>.<fstype>.img` — verify with `ls -lt /mnt/project/RomTools/output`.
 - [ ] No new unpacked directories or leftover `build/` / temp `.img` outside `ROM_WORKDIR/<project>/`.
-- [ ] Boot image repack produced `<name>.signed.img` — unsigned only if explicitly requested.
+- [ ] Boot image repack produced `<name>.signed.img` — via `romtools_repack_boot_image` with default signed enforcement (or shell fallback); unsigned only if explicitly requested.
 
 Use a **filesystem** check for stray output, not git:
 
