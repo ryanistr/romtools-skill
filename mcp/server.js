@@ -120,9 +120,38 @@ function resolveProjectStrict(root, name) {
   if (exact.length === 1) return exact[0];
   const partial = all.filter(p => p.toLowerCase().includes(n));
   throw new Error(
-    'Ambiguous or unknown project "' + name + '". Candidates: ' + (partial.join(', ') || 'none') +
-    '. ASK the user which project is meant before doing any work.'
+    'Unknown or ambiguous project "' + name + '". Available projects: ' + (all.join(', ') || '(none)') +
+    '. Near matches: ' + (partial.join(', ') || 'none') +
+    '. ASK the user to pick one via romtools_set_project, or to explicitly confirm creating a new project with romtools_create_project({name, confirm:true}). Never create silently.'
   );
+}
+
+// Execution tools refuse to run until BOTH the RomTools workdir and an active
+// project have been configured through the MCP. This prevents an agent from
+// skipping discovery and firing a repack/unpack blindly.
+function requireReady(requested) {
+  const v = validateRoot(root());
+  if (!v.valid) {
+    throw new Error('RomTools root not configured or invalid: ' + v.reason + '. Run romtools_set_workdir first.');
+  }
+  const rootPath = v.root;
+  const active = loadConfig().project;
+  if (!active) {
+    throw new Error(
+      'No project selected. Run romtools_find_project / romtools_list_projects, then ' +
+      'romtools_set_project({name}) BEFORE any repack or unpack.'
+    );
+  }
+  if (!fs.existsSync(path.join(rootPath, 'ROM_WORKDIR', active))) {
+    throw new Error('Selected project "' + active + '" no longer exists; run romtools_set_project again.');
+  }
+  if (requested && requested !== active) {
+    throw new Error(
+      'Requested project "' + requested + '" is not the active project "' + active +
+      '". Run romtools_set_project({name: "' + requested + '"}) first.'
+    );
+  }
+  return active;
 }
 
 function runBash(root, script, extraEnv) {
@@ -172,8 +201,8 @@ function missingContexts(lines, partDir) {
 
 const INSTRUCTIONS = [
   'RomTools discovery/config tools. Prefer these over long shell pipelines.',
-  'Use romtools_set_workdir first if no root is configured; romtools_get_config to verify.',
-  'Use romtools_find_project / romtools_list_projects to resolve vague project names and ASK the user when ambiguous.',
+  'Use romtools_get_config first and check ready_for_execution. If no root, run romtools_set_workdir; if no active project, run romtools_find_project / romtools_list_projects then romtools_set_project.',
+  'Execution tools refuse to run until both workdir and project are set. If a project does not exist, ASK the user to select from the available list or to explicitly confirm create_project({name, confirm:true}); never auto-create.',
   'Use romtools_find_script / romtools_list_scripts before running any custom script.',
   'repack_partition and unpack_image execute RomTools functions and enforce the rules: explicit project/fs, output only in <root>/output, autogen-first, and added-only context checks.',
   'unpack_boot_image and repack_boot_image handle boot images; repack is SIGNED-ONLY unless the user explicitly asks for unsigned (allow_unsigned).',
@@ -193,6 +222,27 @@ const TOOLS = [
       type: 'object',
       properties: { path: { type: 'string', description: 'Absolute path to the RomTools root' } },
       required: ['path']
+    }
+  },
+  {
+    name: 'set_project',
+    description: 'Select the active RomTools project after discovery. Required before any repack/unpack tool will run: it resolves the name strictly (asks on ambiguity) and stores the choice. Re-run when switching projects.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Project name resolved from find_project / list_projects' } },
+      required: ['name']
+    }
+  },
+  {
+    name: 'create_project',
+    description: 'Create a new empty project directory under ROM_WORKDIR and select it. ONLY call this after the user explicitly confirms creating a new project (or picks this name from an offered choice). Requires confirm:true; never auto-creates. Mirrors the tool prj_create/prj_open naming rules and sets last_prj.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Letters, numbers, hyphens and underscores only' },
+        confirm: { type: 'boolean', description: 'Must be true after the user explicitly confirms creation' }
+      },
+      required: ['name', 'confirm']
     }
   },
   {
@@ -344,6 +394,9 @@ function handle(name, args) {
         valid_install: v.valid,
         missing: v.missing,
         output_dir: v.valid ? path.join(r, 'output') : null,
+        active_project: loadConfig().project || null,
+        project_selected: !!loadConfig().project,
+        ready_for_execution: v.valid && !!loadConfig().project && fs.existsSync(path.join(r, 'ROM_WORKDIR', loadConfig().project || '')),
         romtools_conf: conf
       };
     }
@@ -351,9 +404,50 @@ function handle(name, args) {
       const v = validateRoot(args.path);
       if (!v.valid) return { accepted: false, reason: v.reason, missing: v.missing, checked: v.root };
       const cfg = loadConfig();
+      const rootChanged = cfg.root && cfg.root !== v.root;
       cfg.root = v.root;
+      if (rootChanged) delete cfg.project;
       saveConfig(cfg);
-      return { accepted: true, root: v.root, output_dir: path.join(v.root, 'output'), missing: [] };
+      return {
+        accepted: true, root: v.root, output_dir: path.join(v.root, 'output'), missing: [],
+        project_cleared: !!rootChanged,
+        next_step: 'Run romtools_find_project / romtools_list_projects, then romtools_set_project before repack or unpack.'
+      };
+    }
+    case 'set_project': {
+      const rootPath = need();
+      const name = String(args.name || '');
+      const project = resolveProjectStrict(rootPath, name);
+      const base = path.join(rootPath, 'ROM_WORKDIR', project);
+      const cfg = loadConfig();
+      cfg.project = project;
+      saveConfig(cfg);
+      return {
+        accepted: true, project, workdir: base,
+        trees: dirsUnder(base).filter(t => ['erofs', 'EXT4', 'F2FS', 'boot', 'super'].includes(t)),
+        next_step: 'Discovery + project selection done. You may now call repack_partition, unpack_image or the boot image tools.'
+      };
+    }
+    case 'create_project': {
+      const rootPath = need();
+      const name = String(args.name || '');
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        throw new Error('invalid project name "' + name + '"; use only letters, numbers, hyphens (-) and underscores (_)');
+      }
+      if (args.confirm !== true) {
+        throw new Error('refusing to create project without confirm:true — ASK the user first and offer the available projects');
+      }
+      const target = path.join(rootPath, 'ROM_WORKDIR', name);
+      if (fs.existsSync(target)) throw new Error('project already exists: ' + target + '. Use romtools_set_project instead.');
+      fs.mkdirSync(target);
+      writeConf(rootPath, { last_prj: name });
+      const cfg = loadConfig();
+      cfg.project = name;
+      saveConfig(cfg);
+      return {
+        created: true, project: name, workdir: target, last_prj: name,
+        note: 'Empty project created. Unpack images into its erofs/ (or EXT4/F2FS/boot) tree before repacking.'
+      };
     }
     case 'get_env':
       return { root: need(), romtools_conf: readConf(r) };
@@ -391,9 +485,15 @@ function handle(name, args) {
         candidates: matches,
         ambiguous: matches.length > 1,
         found: matches.length > 0,
+        available: all,
+        options: matches.length > 0
+          ? 'Ask the user to confirm one of the candidates, then call romtools_set_project.'
+          : (all.length > 0
+            ? 'No match. ASK the user to pick one of the available projects, or to explicitly confirm creating "' + String(args.name || '') + '" with romtools_create_project({name, confirm:true}).'
+            : 'No projects exist at all. ASK the user whether to create "' + String(args.name || '') + '" via romtools_create_project({name, confirm:true}), or whether they will create the project folder themselves.'),
         instruction: matches.length === 1
-          ? 'Confirm this project with the user, then proceed.'
-          : 'ASK the user which project is meant before doing any work.'
+          ? 'Confirm this project with the user, then call romtools_set_project.'
+          : 'ASK the user — never guess and never create a project silently.'
       };
     }
     case 'list_partitions': {
@@ -446,7 +546,7 @@ function handle(name, args) {
     }
     case 'repack_partition': {
       const rootPath = need();
-      const project = resolveProjectStrict(rootPath, args.project);
+      const project = requireReady(args.project);
       const part = safeProject(args.partition);
       if (!part) throw new Error('invalid partition name');
       const fsType = args.fs;
@@ -519,7 +619,7 @@ function handle(name, args) {
     }
     case 'unpack_image': {
       const rootPath = need();
-      const project = resolveProjectStrict(rootPath, args.project);
+      const project = requireReady(args.project);
       const image = String(args.image || '').replace(/\.img$/, '');
       if (!safeName(image)) throw new Error('invalid image name');
       const src = path.join(rootPath, 'input', image + '.img');
@@ -579,7 +679,7 @@ function handle(name, args) {
     }
     case 'unpack_boot_image': {
       const rootPath = need();
-      const project = resolveProjectStrict(rootPath, args.project);
+      const project = requireReady(args.project);
       const image = String(args.image || '').replace(/\.img$/, '');
       if (!safeName(image)) throw new Error('invalid image name');
       const src = path.join(rootPath, 'input', image + '.img');
@@ -615,7 +715,7 @@ function handle(name, args) {
     }
     case 'repack_boot_image': {
       const rootPath = need();
-      const project = resolveProjectStrict(rootPath, args.project);
+      const project = requireReady(args.project);
       const name = safeName(args.name);
       if (!name) throw new Error('invalid boot image name');
       const uboot = path.join(rootPath, 'ROM_WORKDIR', project, 'boot');

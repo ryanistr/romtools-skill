@@ -21,9 +21,11 @@ RomTools lives at `/mnt/project/RomTools`. Every operation is a bash function so
 When the `romtools` MCP server is available, **use it** for RomTools discovery, configuration, repack and unpack. Do not hand-type the shell equivalents just because they are familiar. Manual shell commands in this skill are a **fallback** for agents/sessions with no MCP support, or when the MCP fails.
 
 Discovery / config tools:
-- `romtools_get_config()` — verify root, output dir and `romtools.conf`. Call this first.
+- `romtools_get_config()` — verify root, output dir, `romtools.conf` and `ready_for_execution`. Call this first.
 - `romtools_set_workdir({path})` / `romtools_get_env()` / `romtools_set_env({...})` — root and env setup.
-- `romtools_list_projects()` / `romtools_find_project({name})` — project disambiguation.
+- `romtools_list_projects()` / `romtools_find_project({name})` — project disambiguation; on no match these return the available list and the choices.
+- `romtools_set_project({name})` — **required after discovery**: selects the active project. Every repack/unpack tool refuses to run until this has been done, and refuses a `project` argument that does not match the active project. Re-run it when switching projects.
+- `romtools_create_project({name, confirm: true})` — creates an empty project dir under `ROM_WORKDIR/` and selects it. Only after the user explicitly confirms; never auto-create.
 - `romtools_list_partitions({project, fs})` — partitions plus config/context line counts (§0.3 baseline).
 - `romtools_list_scripts()` / `romtools_find_script({keyword})` / `romtools_list_binaries()` — script and utility discovery.
 - `romtools_list_output()` — output dir with full paths.
@@ -71,7 +73,7 @@ Output : /mnt/project/RomTools/output/system.erofs.img
 
 Users say things like "repack oos system.img" while `ROM_WORKDIR/` contains `oos`, `oos15_old`, `oos16`, `XOS16PORT`, `XOS163`, … . Do **not** pick the first match, assume the short name, or silently expand it.
 
-Call `romtools_find_project({name: "<what the user said>"})`, or `romtools_list_projects()` to see everything. Without the MCP, fall back to:
+Call `romtools_find_project({name: "<what the user said>"})`, then `romtools_set_project({name: "<resolved project>"})` — execution tools are blocked until the project is selected. `romtools_list_projects()` shows everything. Without the MCP, fall back to:
 
 ```bash
 find /mnt/project/RomTools/ROM_WORKDIR -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
@@ -79,6 +81,7 @@ find /mnt/project/RomTools/ROM_WORKDIR -mindepth 1 -maxdepth 1 -type d -printf '
 
 - **One exact match** → state which project you found, then proceed.
 - **Multiple matches or no exact match** → **ASK the user which project**. Show the candidate list. "Sounds like" is not permission to continue.
+- **No match at all** → ask the user to either pick one of the available projects (`romtools_set_project`) or explicitly confirm creating a new project. If `ROM_WORKDIR/` is empty, ask whether to create the folder via `romtools_create_project({name, confirm: true})` or whether they will create it themselves. Never create silently — `create_project` requires `confirm: true` and the tool refuses without it.
 - Also confirm the partition when it is abbreviated or ambiguous. If the user says `system.img`, the unpacked directory is `system` (strip `.img`) and the output will be `system.<fstype>.img`.
 
 ### 0.2 Resolve the target filesystem — honor what the user said
@@ -241,7 +244,7 @@ export DIROUT=/mnt/project/RomTools/output
 
 Before running:
 
-- [ ] `romtools_get_config` was called; project was resolved via `romtools_find_project`/`romtools_list_projects` (or the shell fallback only if MCP unavailable) and **asked about** when vague or ambiguous — never guessed.
+- [ ] `romtools_get_config` reported `ready_for_execution: true` (root + active project set); project was resolved via `romtools_find_project`/`romtools_list_projects` and selected with `romtools_set_project` (or the shell fallback only if MCP unavailable), and **asked about** when vague or ambiguous — never guessed.
 - [ ] Repack/unpack was executed through the MCP tools when available; manual shell was used only as a fallback.
 - [ ] Target filesystem came from the user's explicit request or from the single matching unpacked tree — never defaulted to erofs.
 - [ ] If a custom script was needed, `tool/custom_scripts/` was listed first, the candidate was read, ambiguity was asked about, and required inputs (old/new strings etc.) came from the user.

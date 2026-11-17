@@ -26,10 +26,12 @@ mcp/server.js              <- optional local MCP server (discovery/config only)
 
 `mcp/server.js` is a dependency-free local MCP server — plain Node.js, no `npm install`. It replaces long shell pipelines with short structured calls:
 
-- workdir/config: `get_config`, `set_workdir`, `get_env`, `set_env`
+- workdir/config: `get_config`, `set_workdir`, `set_project`, `create_project`, `get_env`, `set_env`
 - discovery: `list_projects`, `find_project`, `list_partitions` (includes config/context line counts), `list_output`, `list_binaries`, `list_boot_images`
 - scripts: `list_scripts`, `find_script`
 - execution: `repack_partition` (erofs/ext4/f2fs), `unpack_image`, `repack_boot_image`, `unpack_boot_image`
+
+**Execution guard:** repack/unpack tools refuse to run until `set_workdir` and `set_project` have been called. `get_config` reports `ready_for_execution` and a mismatched `project` argument is rejected — the agent must run discovery and select the project first.
 
 It **never repacks** — the skill keeps all the policy rules (ask on ambiguity, explicit filesystem, autogen-first, signed boot images, output discipline). The chosen RomTools root is stored in `mcp/config.json` (gitignored), or set `ROMTOOLS_ROOT` in the environment.
 
@@ -86,10 +88,15 @@ Set up the romtools skill for me.
    `opencode mcp add romtools --global -- node <clone>/mcp/server.js`). If a "romtools"
    MCP is already registered, re-point it to the updated server.js — never leave a stale
    copy running. Verify it connects, then call romtools_set_workdir with the confirmed
-   RomTools root and romtools_get_config to verify. Use romtools_find_project,
-   romtools_list_projects, romtools_repack_partition, romtools_unpack_image,
+   RomTools root and romtools_get_config to verify, then romtools_find_project
+   followed by romtools_set_project — repack/unpack tools refuse to run until
+   a project is selected. Use romtools_find_project, romtools_list_projects,
+   romtools_repack_partition, romtools_unpack_image,
    romtools_list_boot_images, romtools_unpack_boot_image, romtools_repack_boot_image
-   and romtools_list_scripts instead of long hand-typed pipelines. Boot repacks are
+   and romtools_list_scripts instead of long hand-typed pipelines. If I ask for a
+   project that does not exist, show me the available list and ask whether to pick
+   one or create a new project; only create with my explicit confirmation
+   (romtools_create_project with confirm:true), never silently. Boot repacks are
    signed by default; unsigned only if I explicitly ask for it.
 
 7. From now on, use this skill for any RomTools work. When the romtools MCP is available
