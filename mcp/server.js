@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { execFileSync } = require('child_process');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const REQUIRED = ['tool/functions', 'tool/bin', 'input', 'output', 'ROM_WORKDIR'];
@@ -103,12 +104,75 @@ function configReport(r, project, fsType, part) {
   };
 }
 
+function treeFor(root, project, fsType) {
+  const map = { erofs: 'erofs', ext4: 'EXT4', f2fs: 'F2FS' };
+  return path.join(root, 'ROM_WORKDIR', project, map[fsType]);
+}
+
+function resolveProjectStrict(root, name) {
+  const all = dirsUnder(path.join(root, 'ROM_WORKDIR'));
+  const n = String(name || '').toLowerCase();
+  const exact = all.filter(p => p.toLowerCase() === n);
+  if (exact.length === 1) return exact[0];
+  const partial = all.filter(p => p.toLowerCase().includes(n));
+  throw new Error(
+    'Ambiguous or unknown project "' + name + '". Candidates: ' + (partial.join(', ') || 'none') +
+    '. ASK the user which project is meant before doing any work.'
+  );
+}
+
+function runBash(root, script, extraEnv) {
+  try {
+    return execFileSync('bash', ['-c', script], {
+      cwd: root,
+      env: Object.assign({}, process.env, extraEnv || {}),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 0
+    });
+  } catch (e) {
+    const detail = String(e.stderr || e.stdout || e.message || '').trim();
+    throw new Error('RomTools command failed: ' + detail.slice(-4000));
+  }
+}
+
+function tailLines(text, n) {
+  const lines = String(text || '').split(/\r?\n/).filter(Boolean);
+  return lines.slice(-n);
+}
+
+function addedLines(file, before) {
+  if (!file || !fs.existsSync(file)) return [];
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  if (lines[lines.length - 1] === '') lines.pop();
+  return before == null ? lines : lines.slice(before);
+}
+
+function missingContexts(lines, partDir) {
+  const policyDir = path.join(partDir, 'etc', 'selinux');
+  if (!fs.existsSync(policyDir)) return null; // cannot verify
+  const tokens = new Set();
+  for (const f of fs.readdirSync(policyDir)) {
+    if (!/sepolicy\.cil$/.test(f)) continue;
+    for (const t of fs.readFileSync(path.join(policyDir, f), 'utf8').split(/[^A-Za-z0-9_]+/)) {
+      if (t) tokens.add(t);
+    }
+  }
+  const missing = [];
+  for (const line of lines) {
+    const m = String(line).match(/u:object_r:([A-Za-z0-9_]+):s0/);
+    if (m && !tokens.has(m[1]) && !missing.includes(m[1])) missing.push(m[1]);
+  }
+  return missing;
+}
+
 const INSTRUCTIONS = [
   'RomTools discovery/config tools. Prefer these over long shell pipelines.',
   'Use romtools_set_workdir first if no root is configured; romtools_get_config to verify.',
   'Use romtools_find_project / romtools_list_projects to resolve vague project names and ASK the user when ambiguous.',
   'Use romtools_find_script / romtools_list_scripts before running any custom script.',
-  'These tools never repack. Follow the romtools SKILL for policy, autogen-first rules, output discipline, and reporting the full absolute output path.'
+  'repack_partition and unpack_image execute RomTools functions and enforce the rules: explicit project/fs, output only in <root>/output, autogen-first, and added-only context checks.',
+  'Always tell the user the full absolute output path returned by a repack. Follow the romtools SKILL for all remaining policy.'
 ].join(' ');
 
 const TOOLS = [
@@ -186,6 +250,39 @@ const TOOLS = [
   {
     name: 'list_output',
     description: 'List packed images in the RomTools output directory with size and modified time.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'repack_partition',
+    description: 'Execute a RomTools repack of an unpacked partition. Requires explicit project, partition and fs (erofs/ext4/f2fs); never guesses. Runs embedded autogen, writes only to <root>/output, and returns the full output path plus only newly added config/context lines and any missing sepolicy contexts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string' },
+        partition: { type: 'string' },
+        fs: { type: 'string', enum: ['erofs', 'ext4', 'f2fs'] },
+        compression: { type: 'string', description: 'erofs only; default lz4hc (level 9)' },
+        legacy: { type: 'string', description: 'erofs only; "0" default, "1" for old kernels' }
+      },
+      required: ['project', 'partition', 'fs']
+    }
+  },
+  {
+    name: 'unpack_image',
+    description: 'Unpack an image from input/ into the chosen project tree in ROM_WORKDIR. Detects erofs/ext4/f2fs with blkid unless fs is given. Refuses to overwrite an existing unpacked folder. Note: RomTools consumes the source image from input/ after a successful unpack.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string' },
+        image: { type: 'string', description: 'Image filename in input/, with or without .img' },
+        fs: { type: 'string', enum: ['erofs', 'ext4', 'f2fs'] }
+      },
+      required: ['project', 'image']
+    }
+  },
+  {
+    name: 'list_binaries',
+    description: 'List the executable utilities shipped in tool/bin (mkfs.erofs, extract.erofs, gen_fs-config, bbootimg.jar, etc.).',
     inputSchema: { type: 'object', properties: {} }
   }
 ];
@@ -307,6 +404,130 @@ function handle(name, args) {
           })
           .sort((a, b) => b.modified.localeCompare(a.modified))
       };
+    }
+    case 'repack_partition': {
+      const rootPath = need();
+      const project = resolveProjectStrict(rootPath, args.project);
+      const part = safeProject(args.partition);
+      if (!part) throw new Error('invalid partition name');
+      const fsType = args.fs;
+      if (!fsType || !['erofs', 'ext4', 'f2fs'].includes(fsType)) {
+        throw new Error('fs must be explicitly erofs, ext4 or f2fs — never default');
+      }
+      const tree = treeFor(rootPath, project, fsType);
+      const partDir = path.join(tree, part);
+      if (!fs.existsSync(partDir)) throw new Error('no unpacked partition at ' + partDir);
+      const conf = readConf(rootPath);
+      const before = configReport(rootPath, project, fsType, part);
+      const comp = args.compression || 'lz4hc';
+      const legacy = args.legacy || '0';
+      if (!/^(lz4|lz4hc|lzma|deflate|zstd)(,([0-9]+|level=[0-9]+))?$/.test(comp)) {
+        throw new Error('invalid compression "' + comp + '"; use lz4, lz4hc[,level], lzma[,level], deflate[,level] or zstd[,level]');
+      }
+      if (!/^[01]$/.test(legacy)) throw new Error('legacy must be "0" or "1"');
+      let call, extra = {};
+      if (fsType === 'erofs') {
+        call = 'repack_erofs_cmd "$PART" "$COMP" "$LEGACY" -q';
+      } else if (fsType === 'f2fs') {
+        call = 'repack_f2fs_cmd "$PART"';
+      } else {
+        const sizeFile = path.join(rootPath, 'ROM_WORKDIR', project, 'EXT4', 'config', part, part + '_size.txt');
+        if (!fs.existsSync(sizeFile)) {
+          throw new Error('ext4 needs an explicit size; missing ' + sizeFile + '. Ask the user for the size in bytes.');
+        }
+        extra.SIZE = fs.readFileSync(sizeFile, 'utf8').trim();
+        call = 'repack_ext4_cmd "$PART" "$SIZE"';
+      }
+      const script = [
+        'set -o pipefail',
+        'cd "$ROOT" || exit 1',
+        'source tool/functions',
+        'export PRJDIR="$ROOT/ROM_WORKDIR/$PROJECT"',
+        'export erofsdir="$PRJDIR/erofs" ext4dir="$PRJDIR/EXT4" f2fsdir="$PRJDIR/F2FS" u_bootdir="$PRJDIR/boot" superdir="$PRJDIR/super"',
+        'export DIROUT="$ROOT/output"',
+        'export usable_threads="$THREADS"',
+        'export vendor_odm_bin_fcontexts="$VBIN"',
+        'export other_bin_fcontexts="$SBIN"',
+        call + ' 2>&1'
+      ].join('\n');
+      const env = Object.assign({
+        ROOT: rootPath, PROJECT: project, PART: part, COMP: comp, LEGACY: legacy,
+        THREADS: conf.allocated_threads || '4',
+        VBIN: conf.vendor_odm_bin_contexts_def || 'vendor_qti_init_shell_exec',
+        SBIN: conf.other_bin_contexts_def || 'system_file'
+      }, extra);
+      const output = path.join(rootPath, 'output', part + '.' + fsType + '.img');
+      let out;
+      try {
+        out = runBash(rootPath, script, env);
+      } catch (e) {
+        if (fs.existsSync(output) && fs.statSync(output).size === 0) fs.unlinkSync(output);
+        throw e;
+      }
+      const after = configReport(rootPath, project, fsType, part);
+      const addedCfg = addedLines(after.fs_config, before.fs_config_lines);
+      const addedCtx = addedLines(after.file_contexts, before.file_contexts_lines);
+      return {
+        success: fs.existsSync(output),
+        project, partition: part, fs: fsType,
+        output,
+        output_size: fs.existsSync(output) ? fs.statSync(output).size : null,
+        autogen_added_fs_config: addedCfg,
+        autogen_added_file_contexts: addedCtx,
+        missing_contexts: addedCtx.length ? missingContexts(addedCtx, partDir) : [],
+        tail: tailLines(out, 12)
+      };
+    }
+    case 'unpack_image': {
+      const rootPath = need();
+      const project = resolveProjectStrict(rootPath, args.project);
+      const image = String(args.image || '').replace(/\.img$/, '');
+      if (!safeName(image)) throw new Error('invalid image name');
+      const src = path.join(rootPath, 'input', image + '.img');
+      if (!fs.existsSync(src)) throw new Error('image not found: ' + src);
+      let fsType = args.fs;
+      if (!fsType) {
+        const detected = runBash(rootPath,
+          'blkid -o value -s TYPE "$SRC" 2>/dev/null || sudo blkid -o value -s TYPE "$SRC" 2>/dev/null || true',
+          { SRC: src }).trim();
+        if (!['erofs', 'ext4', 'f2fs'].includes(detected)) {
+          throw new Error('could not detect fs type (got "' + detected + '"); pass fs explicitly');
+        }
+        fsType = detected;
+      }
+      if (!['erofs', 'ext4', 'f2fs'].includes(fsType)) throw new Error('fs must be erofs, ext4 or f2fs');
+      const tree = treeFor(rootPath, project, fsType);
+      const target = path.join(tree, image);
+      if (fs.existsSync(target)) throw new Error('refusing to overwrite existing unpacked tree: ' + target);
+      const conf = readConf(rootPath);
+      const script = [
+        'cd "$ROOT" || exit 1',
+        'source tool/functions',
+        'export PRJDIR="$ROOT/ROM_WORKDIR/$PROJECT"',
+        'export erofsdir="$PRJDIR/erofs" ext4dir="$PRJDIR/EXT4" f2fsdir="$PRJDIR/F2FS" u_bootdir="$PRJDIR/boot" superdir="$PRJDIR/super"',
+        'export DIROUT="$ROOT/output"',
+        'export usable_threads="$THREADS"',
+        'export vendor_odm_bin_fcontexts="$VBIN"',
+        'export other_bin_fcontexts="$SBIN"',
+        'unpack_' + fsType + ' "$IMAGE" 2>&1'
+      ].join('\n');
+      const out = runBash(rootPath, script, {
+        ROOT: rootPath, PROJECT: project, IMAGE: image,
+        THREADS: conf.allocated_threads || '4',
+        VBIN: conf.vendor_odm_bin_contexts_def || 'vendor_qti_init_shell_exec',
+        SBIN: conf.other_bin_contexts_def || 'system_file'
+      });
+      return {
+        success: fs.existsSync(target),
+        project, image, fs: fsType,
+        unpacked_dir: target,
+        source_image_consumed: !fs.existsSync(src),
+        tail: tailLines(out, 12)
+      };
+    }
+    case 'list_binaries': {
+      const dir = path.join(need(), 'tool', 'bin');
+      return { root: r, dir, binaries: fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile()).map(e => e.name).sort() };
     }
     default:
       throw new Error('Unknown tool: ' + name);

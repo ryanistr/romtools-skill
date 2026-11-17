@@ -71,23 +71,34 @@ Set up the romtools skill for me.
    to the confirmed RomTools root from step 2, including the example in the
    "Reporting the result" section. Confirm the final paths with me.
 
-5. Register the MCP companion if your agent supports MCP: add a local stdio server named
-   "romtools" running `node <clone>/mcp/server.js` (OpenCode:
-   `opencode mcp add romtools --global -- node <clone>/mcp/server.js`). Verify it connects,
-   then call romtools_set_workdir with the confirmed RomTools root and romtools_get_config
-   to verify. Use romtools_find_project / romtools_list_projects and romtools_list_scripts
-   instead of long find/ls pipelines. If this agent has no MCP support, skip this step and
-   use the shell fallbacks in the skill.
+5. Ask me whether this agent supports MCP servers.
+   - If it does not, ask me whether I want MCP support installed/configured. If I say
+     no, skip every MCP step and use only the skill's manual shell fallbacks. If I say
+     yes, help me enable MCP for this agent before continuing (do not guess the mechanism).
+   - If it does support MCP, ask me whether I want to use the romtools MCP. If I say no,
+     skip MCP setup entirely.
+   - Never register or use the MCP without my explicit answer.
 
-6. From now on, use this skill for any RomTools work and prefer the romtools MCP for
-   discovery/config. Follow its rules: ask when a project name is vague or ambiguous;
-   honor an explicit target filesystem (ext4/f2fs/erofs) instead of defaulting to erofs;
-   check available custom scripts before using one and ask when the match is ambiguous;
-   run the embedded autogen tools first and validate only newly added contexts; keep all
-   output in <root>/output/; clean up scratch files; and never use git status as a
-   repack-output check.
+6. If I chose to use the romtools MCP, install or UPDATE it from this repo: copy
+   `<clone>/mcp/server.js` to the server path this agent runs, or register the command
+   directly from the clone (OpenCode:
+   `opencode mcp add romtools --global -- node <clone>/mcp/server.js`). If a "romtools"
+   MCP is already registered, re-point it to the updated server.js — never leave a stale
+   copy running. Verify it connects, then call romtools_set_workdir with the confirmed
+   RomTools root and romtools_get_config to verify. Use romtools_find_project,
+   romtools_list_projects, romtools_repack_partition, romtools_unpack_image and
+   romtools_list_scripts instead of long hand-typed pipelines.
 
-7. Whenever a RomTools execution finishes, end your response with the full absolute
+7. From now on, use this skill for any RomTools work. When the romtools MCP is available
+   you MUST use it for discovery, config, repack and unpack; manual shell is a fallback
+   only when the MCP is unavailable or I declined it. Follow its rules: ask when a
+   project name is vague or ambiguous; honor an explicit target filesystem
+   (ext4/f2fs/erofs) instead of defaulting to erofs; check available custom scripts before
+   using one and ask when the match is ambiguous; run the embedded autogen tools first and
+   validate only newly added contexts; keep all output in <root>/output/; clean up scratch
+   files; and never use git status as a repack-output check.
+
+8. Whenever a RomTools execution finishes, end your response with the full absolute
    output path in exactly this form (using the real path and the actual filename):
 
    Repack done...
@@ -95,8 +106,8 @@ Set up the romtools skill for me.
 
    Use the real produced filename, e.g. <name>.signed.img for signed boot images.
 
-8. Confirm setup is complete and tell me the installed skill path, the RomTools root,
-   and whether the MCP server is connected.
+9. Confirm setup is complete and tell me the installed skill path, the RomTools root,
+   and whether the romtools MCP is connected (or that I declined it).
 ```
 
 ## Updating
@@ -104,6 +115,8 @@ Set up the romtools skill for me.
 ```bash
 git -C <your clone> pull
 cp <your clone>/skills/romtools/SKILL.md <agent skills dir>/romtools/SKILL.md
+# if you use the MCP, also refresh/re-register the server:
+cp <your clone>/mcp/server.js <path the MCP server runs>
 ```
 
-Then re-apply step 4 of the prompt if your RomTools root changed.
+Then re-apply step 4 of the prompt if your RomTools root changed, and step 6 if the MCP registration needs updating.

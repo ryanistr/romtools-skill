@@ -16,19 +16,23 @@ RomTools lives at `/mnt/project/RomTools`. Every operation is a bash function so
 5. **Contexts that autogen adds must exist in sepolicy.** Validate only the newly added lines (section 2) against `<partition>/etc/selinux/*sepolicy.cil`. Pre-existing entries are presumed valid — do not rescan the whole file. The `tool/romtools.conf` default `--vbin` is `vendor_qti_init_shell_exec`, which does **not** exist on this vendor; replace it with an existing type such as `vendor_shell_exec` (or fix `vendor_odm_bin_contexts_def` in `romtools.conf` so future autogen emits the right one).
 6. **Never use destructive git undo** (`git reset --hard`, `git clean -f`, `git checkout --`, forced restores) in this workdir. These are real ROM porting trees with unrelated uncommitted work. `git status` is also **not** a repack-verification tool here (see section 4).
 
-## Prefer the `romtools` MCP for discovery/config
+## Use the `romtools` MCP — mandatory when available, manual fallback only
 
-If the `romtools` MCP server is available, use its tools instead of long shell pipelines. They are cheap, structured, and never repack:
+When the `romtools` MCP server is available, **use it** for RomTools discovery, configuration, repack and unpack. Do not hand-type the shell equivalents just because they are familiar. Manual shell commands in this skill are a **fallback** for agents/sessions with no MCP support, or when the MCP fails.
 
-- `romtools_get_config()` — verify the root, output dir and `romtools.conf` values. Call this first.
-- `romtools_set_workdir({path})` — validate and store the RomTools root when it is unknown.
-- `romtools_get_env()` / `romtools_set_env({...})` — read/update threads and autogen context defaults.
-- `romtools_list_projects()` / `romtools_find_project({name})` — project discovery and disambiguation.
-- `romtools_list_partitions({project, fs})` — partitions plus config/context line counts (use for the §0.3 baseline).
-- `romtools_list_scripts()` / `romtools_find_script({keyword})` — script discovery.
-- `romtools_list_output()` — output dir listing with full paths.
+Discovery / config tools:
+- `romtools_get_config()` — verify root, output dir and `romtools.conf`. Call this first.
+- `romtools_set_workdir({path})` / `romtools_get_env()` / `romtools_set_env({...})` — root and env setup.
+- `romtools_list_projects()` / `romtools_find_project({name})` — project disambiguation.
+- `romtools_list_partitions({project, fs})` — partitions plus config/context line counts (§0.3 baseline).
+- `romtools_list_scripts()` / `romtools_find_script({keyword})` / `romtools_list_binaries()` — script and utility discovery.
+- `romtools_list_output()` — output dir with full paths.
 
-The MCP supplies **facts**; this skill still supplies the **rules**: ask on ambiguity, honor an explicit filesystem, autogen-first, only-added validation, output discipline, signed boot images, cleanup, and the reporting format. If the MCP is unavailable, fall back to the shell commands below.
+Execution tools:
+- `romtools_repack_partition({project, partition, fs, compression?, legacy?})` — runs the correct repack function, sets `DIROUT` to `<root>/output`, autogen-first, and returns `output` (full path), `autogen_added_file_contexts`, `autogen_added_fs_config` and `missing_contexts`. Requires explicit `fs`; validates project/partition and compression before running.
+- `romtools_unpack_image({project, image, fs?})` — detects fs with `blkid` if omitted, refuses to overwrite an existing tree, returns `unpacked_dir`.
+
+The MCP enforces the mechanical rules (explicit project/fs, output only in `output/`, autogen-first, added-only context checks). This skill still supplies the **judgement** rules: ask on ambiguity, signed boot images, cleanup, and reporting the full output path. Never treat an MCP failure as permission to skip a rule — fall back to the documented shell flow and keep the same rules.
 
 ## Reporting the result (always)
 
@@ -140,7 +144,7 @@ For ext4, `<size>` in bytes comes from `<project>/EXT4/config/<part>/<part>_size
 - `$3` — `0` = modern kernel (no `-E legacy-compress`), `1` = legacy-compress for old kernels. Use `0` here.
 - `$4` — optional flags forwarded to **both** `gen_fs-config` and `gen_file-contexts`; pass `-q` for quiet. Omit to see their output.
 
-The function runs the whole flow in order: `gen_fs-config` → `gen_file-contexts` → `mkfs.erofs`. Canonical EROFS example (also the verified test command for this workdir):
+The function runs the whole flow in order: `gen_fs-config` → `gen_file-contexts` → `mkfs.erofs`. With the MCP available, call `romtools_repack_partition({project, partition, fs, compression, legacy})` instead of the shell below; it returns the verified output path and only the autogen-added entries. Manual fallback (verified test command for this workdir):
 
 ```bash
 cd /mnt/project/RomTools && source tool/functions && \
@@ -155,7 +159,7 @@ The interactive counterpart is menu `4` → "Repack EXT4/F2FS/EROFS image", whic
 
 ## 2. Working with EROFS partitions
 
-**Unpack.** Put `<name>.img` in `input/`, then menu `4` → "Unpack EXT4/F2FS/EROFS image" (it detects the fs type with `blkid`). It extracts into `$erofsdir/<name>/` and consumes the source image. Direct equivalent:
+**Unpack.** Put `<name>.img` in `input/`. With the MCP, call `romtools_unpack_image({project, image, fs?})` — it detects the fs type with `blkid` when omitted and refuses to overwrite an existing tree. Manual fallback: menu `4` → "Unpack EXT4/F2FS/EROFS image", or:
 
 ```bash
 tool/bin/extract.erofs -T${usable_threads} -i input/<name>.img -o "$erofsdir" -x
@@ -234,7 +238,8 @@ export DIROUT=/mnt/project/RomTools/output
 
 Before running:
 
-- [ ] Project was resolved via `romtools_find_project`/`romtools_list_projects` (or the shell fallback) and **asked about** when the name was vague or matched more than one project — never guessed.
+- [ ] `romtools_get_config` was called; project was resolved via `romtools_find_project`/`romtools_list_projects` (or the shell fallback only if MCP unavailable) and **asked about** when vague or ambiguous — never guessed.
+- [ ] Repack/unpack was executed through the MCP tools when available; manual shell was used only as a fallback.
 - [ ] Target filesystem came from the user's explicit request or from the single matching unpacked tree — never defaulted to erofs.
 - [ ] If a custom script was needed, `tool/custom_scripts/` was listed first, the candidate was read, ambiguity was asked about, and required inputs (old/new strings etc.) came from the user.
 - [ ] Target unpacked tree is under `/mnt/project/RomTools/ROM_WORKDIR/<project>/...` — not `input/`, `output/`, `tool/tmp/`, `/tmp`, or `$HOME`.
