@@ -18,8 +18,28 @@ It was written against an install rooted at `/mnt/project/RomTools`. The bootstr
 
 ```
 README.md
-skills/romtools/SKILL.md
+skills/romtools/SKILL.md   <- the agent skill
+mcp/server.js              <- optional local MCP server (discovery/config only)
 ```
+
+## MCP companion (recommended)
+
+`mcp/server.js` is a dependency-free local MCP server — plain Node.js, no `npm install`. It replaces long shell pipelines with short structured calls:
+
+- workdir/config: `get_config`, `set_workdir`, `get_env`, `set_env`
+- discovery: `list_projects`, `find_project`, `list_partitions` (includes config/context line counts), `list_output`
+- scripts: `list_scripts`, `find_script`
+
+It **never repacks** — the skill keeps all the policy rules (ask on ambiguity, explicit filesystem, autogen-first, signed boot images, output discipline). The chosen RomTools root is stored in `mcp/config.json` (gitignored), or set `ROMTOOLS_ROOT` in the environment.
+
+OpenCode registration:
+
+```sh
+opencode mcp add romtools --global -- node /absolute/path/to/romtools-skill/mcp/server.js
+opencode mcp list   # ✓ romtools connected
+```
+
+Other agents: register `node /absolute/path/to/romtools-skill/mcp/server.js` as a local stdio MCP server named `romtools`. Then call `set_workdir` once with your RomTools root.
 
 ## Install / bootstrap prompt
 
@@ -29,8 +49,9 @@ Copy the entire block below and paste it to **any agent** (OpenCode, Claude Code
 Set up the romtools skill for me.
 
 1. Clone this repository: https://github.com/ryanistr/romtools-skill.git
-   Put the clone in a scratch location (use your TMPDIR, e.g. /tmp/opencode/romtools-skill;
-   never drop it directly in $HOME). Read README.md and skills/romtools/SKILL.md.
+   Put the clone in your platform's scratch/temp directory (for example
+   "$TMPDIR/romtools-skill"); never drop it directly in $HOME. Read README.md
+   and skills/romtools/SKILL.md.
 
 2. Ask me where my RomTools directory is installed. DO NOT GUESS IT.
    - If I give you a path, verify it looks like RomTools: it must contain
@@ -50,14 +71,23 @@ Set up the romtools skill for me.
    to the confirmed RomTools root from step 2, including the example in the
    "Reporting the result" section. Confirm the final paths with me.
 
-5. From now on, use this skill for any RomTools work. Follow its rules: list ROM_WORKDIR
-   and ask when a project name is vague or ambiguous; honor an explicit target
-   filesystem (ext4/f2fs/erofs) instead of defaulting to erofs; list tool/custom_scripts/
-   before using a script and ask when the match is ambiguous; run the embedded autogen
-   tools first and validate only newly added contexts; keep all output in <root>/output/;
-   clean up scratch files; and never use git status as a repack-output check.
+5. Register the MCP companion if your agent supports MCP: add a local stdio server named
+   "romtools" running `node <clone>/mcp/server.js` (OpenCode:
+   `opencode mcp add romtools --global -- node <clone>/mcp/server.js`). Verify it connects,
+   then call romtools_set_workdir with the confirmed RomTools root and romtools_get_config
+   to verify. Use romtools_find_project / romtools_list_projects and romtools_list_scripts
+   instead of long find/ls pipelines. If this agent has no MCP support, skip this step and
+   use the shell fallbacks in the skill.
 
-6. Whenever a RomTools execution finishes, end your response with the full absolute
+6. From now on, use this skill for any RomTools work and prefer the romtools MCP for
+   discovery/config. Follow its rules: ask when a project name is vague or ambiguous;
+   honor an explicit target filesystem (ext4/f2fs/erofs) instead of defaulting to erofs;
+   check available custom scripts before using one and ask when the match is ambiguous;
+   run the embedded autogen tools first and validate only newly added contexts; keep all
+   output in <root>/output/; clean up scratch files; and never use git status as a
+   repack-output check.
+
+7. Whenever a RomTools execution finishes, end your response with the full absolute
    output path in exactly this form (using the real path and the actual filename):
 
    Repack done...
@@ -65,8 +95,8 @@ Set up the romtools skill for me.
 
    Use the real produced filename, e.g. <name>.signed.img for signed boot images.
 
-7. Confirm setup is complete and tell me the installed skill path and the RomTools root
-   you configured.
+8. Confirm setup is complete and tell me the installed skill path, the RomTools root,
+   and whether the MCP server is connected.
 ```
 
 ## Updating

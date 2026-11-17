@@ -16,6 +16,20 @@ RomTools lives at `/mnt/project/RomTools`. Every operation is a bash function so
 5. **Contexts that autogen adds must exist in sepolicy.** Validate only the newly added lines (section 2) against `<partition>/etc/selinux/*sepolicy.cil`. Pre-existing entries are presumed valid — do not rescan the whole file. The `tool/romtools.conf` default `--vbin` is `vendor_qti_init_shell_exec`, which does **not** exist on this vendor; replace it with an existing type such as `vendor_shell_exec` (or fix `vendor_odm_bin_contexts_def` in `romtools.conf` so future autogen emits the right one).
 6. **Never use destructive git undo** (`git reset --hard`, `git clean -f`, `git checkout --`, forced restores) in this workdir. These are real ROM porting trees with unrelated uncommitted work. `git status` is also **not** a repack-verification tool here (see section 4).
 
+## Prefer the `romtools` MCP for discovery/config
+
+If the `romtools` MCP server is available, use its tools instead of long shell pipelines. They are cheap, structured, and never repack:
+
+- `romtools_get_config()` — verify the root, output dir and `romtools.conf` values. Call this first.
+- `romtools_set_workdir({path})` — validate and store the RomTools root when it is unknown.
+- `romtools_get_env()` / `romtools_set_env({...})` — read/update threads and autogen context defaults.
+- `romtools_list_projects()` / `romtools_find_project({name})` — project discovery and disambiguation.
+- `romtools_list_partitions({project, fs})` — partitions plus config/context line counts (use for the §0.3 baseline).
+- `romtools_list_scripts()` / `romtools_find_script({keyword})` — script discovery.
+- `romtools_list_output()` — output dir listing with full paths.
+
+The MCP supplies **facts**; this skill still supplies the **rules**: ask on ambiguity, honor an explicit filesystem, autogen-first, only-added validation, output discipline, signed boot images, cleanup, and the reporting format. If the MCP is unavailable, fall back to the shell commands below.
+
 ## Reporting the result (always)
 
 When a RomTools execution finishes, end the response with the **full absolute output path** so the user can check it immediately. Exact format:
@@ -50,6 +64,8 @@ Output : /mnt/project/RomTools/output/system.erofs.img
 
 Users say things like "repack oos system.img" while `ROM_WORKDIR/` contains `oos`, `oos15_old`, `oos16`, `XOS16PORT`, `XOS163`, … . Do **not** pick the first match, assume the short name, or silently expand it.
 
+Call `romtools_find_project({name: "<what the user said>"})`, or `romtools_list_projects()` to see everything. Without the MCP, fall back to:
+
 ```bash
 find /mnt/project/RomTools/ROM_WORKDIR -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
 ```
@@ -76,11 +92,13 @@ wc -l <project>/erofs/config/<part>_fs_config                # baseline line cou
 wc -l <project>/erofs/config/<part>_file_contexts            # baseline line count (erofs)
 ```
 
-Note whether the config/context files already exist — that is fine. Autogen only fills gaps and **appends** new entries to the end of the file (verified behavior of both shipped tools), so those line counts let you validate only what was added. The marker and the validation temp file created later are scratch only — they must be removed in the cleanup step at the end (section 4).
+`romtools_list_partitions({project, fs})` returns the config/context paths and their current line counts — use it for this baseline when the MCP is available. Note whether the config/context files already exist — that is fine. Autogen only fills gaps and **appends** new entries to the end of the file (verified behavior of both shipped tools), so those line counts let you validate only what was added. The marker and the validation temp file created later are scratch only — they must be removed in the cleanup step at the end (section 4).
 
 ### 0.4 Custom scripts — list before using one
 
 `tool/custom_scripts/` holds helper scripts (main menu `10`). Scripts change over time and names are not always obvious — do not assume this skill enumerates them all. When a request refers to a script (e.g. "run the secpatch script", "normalize props", "merge tr partitions"), do this first:
+
+Call `romtools_list_scripts()` (and `romtools_find_script({keyword})` for a name hint). Without the MCP, fall back to:
 
 ```bash
 ls -1 /mnt/project/RomTools/tool/custom_scripts/
@@ -216,7 +234,7 @@ export DIROUT=/mnt/project/RomTools/output
 
 Before running:
 
-- [ ] Project was resolved by listing `ROM_WORKDIR/` and **asked about** when the name was vague or matched more than one project — never guessed.
+- [ ] Project was resolved via `romtools_find_project`/`romtools_list_projects` (or the shell fallback) and **asked about** when the name was vague or matched more than one project — never guessed.
 - [ ] Target filesystem came from the user's explicit request or from the single matching unpacked tree — never defaulted to erofs.
 - [ ] If a custom script was needed, `tool/custom_scripts/` was listed first, the candidate was read, ambiguity was asked about, and required inputs (old/new strings etc.) came from the user.
 - [ ] Target unpacked tree is under `/mnt/project/RomTools/ROM_WORKDIR/<project>/...` — not `input/`, `output/`, `tool/tmp/`, `/tmp`, or `$HOME`.
