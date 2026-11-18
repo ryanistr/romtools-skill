@@ -20,6 +20,8 @@ RomTools lives at `/mnt/project/RomTools`. Every operation is a bash function so
 
 When the `romtools` MCP server is available, **use it** for RomTools discovery, configuration, repack and unpack. Do not hand-type the shell equivalents just because they are familiar. Manual shell commands in this skill are a **fallback** for agents/sessions with no MCP support, or when the MCP fails.
 
+The `adb-fastboot` MCP (`mcp/adb-fastboot/server.py`, skill `skills/adb-fastboot-mcp/SKILL.md`) is a **separate, optional** companion for device-side adb/fastboot work. It is not required for any RomTools operation and does not alter the rules in this skill.
+
 Discovery / config tools:
 - `romtools_get_config()` — verify root, output dir, `romtools.conf` and `ready_for_execution`. Call this first.
 - `romtools_set_workdir({path})` / `romtools_get_env()` / `romtools_set_env({...})` — root and env setup.

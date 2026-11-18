@@ -1,2 +1,4 @@
 mcp/config.json
 node_modules/
+mcp/adb-fastboot/.venv/
+mcp/adb-fastboot/__pycache__/

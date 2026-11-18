@@ -18,8 +18,10 @@ It was written against an install rooted at `/mnt/project/RomTools`. The bootstr
 
 ```
 README.md
-skills/romtools/SKILL.md   <- the agent skill
-mcp/server.js              <- optional local MCP server (discovery/config only)
+skills/romtools/SKILL.md          <- the agent skill
+skills/adb-fastboot-mcp/SKILL.md  <- adb/fastboot device-control skill
+mcp/server.js                     <- optional local MCP server (discovery/config only)
+mcp/adb-fastboot/server.py        <- adb/fastboot MCP (22 structured tools + chaining)
 ```
 
 ## MCP companion (recommended)
@@ -43,6 +45,20 @@ opencode mcp list   # ✓ romtools connected
 ```
 
 Other agents: register `node /absolute/path/to/romtools-skill/mcp/server.js` as a local stdio MCP server named `romtools`. Then call `set_workdir` once with your RomTools root.
+
+## Optional adb/fastboot companion
+
+`skills/adb-fastboot-mcp/SKILL.md` and `mcp/adb-fastboot/` are a **separate, optional** MCP for device-side work. RomTools repacking does not need a connected device; install this only if you also drive adb/fastboot (device probe, logcat/dmesg/dumpsys, UI automation, flash/reboot chains). It does not change any RomTools rule.
+
+```sh
+python3 -m venv mcp/adb-fastboot/.venv
+mcp/adb-fastboot/.venv/bin/pip install -r mcp/adb-fastboot/requirements.txt
+opencode mcp add adb-fastboot --global -- \
+  /absolute/path/to/romtools-skill/mcp/adb-fastboot/.venv/bin/python \
+  /absolute/path/to/romtools-skill/mcp/adb-fastboot/server.py
+```
+
+The venv is gitignored — create it locally after cloning. Other agents register the same command as a local stdio MCP named `adb-fastboot`.
 
 ## Install / bootstrap prompt
 
