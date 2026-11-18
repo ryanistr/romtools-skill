@@ -127,8 +127,16 @@ def _compact_step(kind: str, result: dict[str, Any], args: dict[str, Any]) -> di
 
 
 def _record(tool: str, args: dict[str, Any], ok: bool) -> None:
+    short_args: list[str] = []
+    for key, value in args.items():
+        if key == "confirm" or value is None:
+            continue
+        text = str(value).replace("\n", " ")
+        if len(text) > 80:
+            text = text[:80] + "…"
+        short_args.append(f"{key}={text}")
     STATE["history"].append(
-        {"tool": tool, "args": {k: v for k, v in args.items() if k != "confirm"}, "ok": ok, "at": int(time.time())}
+        {"tool": tool, "args": ", ".join(short_args)[:160], "ok": ok, "at": int(time.time())}
     )
     del STATE["history"][:-50]
 
@@ -561,7 +569,7 @@ def _dmesg(lines: int = 200, grep: str | None = None, clear: bool = False, su: b
 
 
 STEP_TOOLS: dict[str, Any] = {
-    "device_status": lambda a: _device_status(),
+    "device_status": lambda a: _device_status(a.get("verbose", False)),
     "device_probe": lambda a: _device_probe(a.get("timeout", 3), a.get("serial")),
     "ui_dump": lambda a: _ui_dump(a.get("serial"), a.get("clickable_only", False), a.get("limit", 300)),
     "ui_input": lambda a: _ui_input(a.get("action", ""), a.get("x", 0), a.get("y", 0), a.get("x2", 0), a.get("y2", 0), a.get("duration", 300), a.get("value", ""), a.get("serial")),
@@ -583,15 +591,26 @@ STEP_TOOLS: dict[str, Any] = {
 }
 
 
-def _device_status() -> dict[str, Any]:
+def _device_status(verbose: bool = False) -> dict[str, Any]:
     snapshot = _detect(STATE["serial"])
+    devices = snapshot["adb"] + snapshot["fastboot"]
+    serial = STATE["serial"] or (devices[0]["serial"] if devices else None)
+    if verbose:
+        return {
+            "ok": True,
+            "target_serial": STATE["serial"],
+            "mode": snapshot["mode"],
+            "adb_devices": snapshot["adb"],
+            "fastboot_devices": snapshot["fastboot"],
+            "history": STATE["history"][-10:],
+        }
     return {
         "ok": True,
-        "target_serial": STATE["serial"],
         "mode": snapshot["mode"],
-        "adb_devices": snapshot["adb"],
-        "fastboot_devices": snapshot["fastboot"],
-        "history": STATE["history"][-10:],
+        "serial": serial,
+        "adb": [d["state"] for d in snapshot["adb"]],
+        "fastboot": len(snapshot["fastboot"]),
+        "recent": [f"{h['tool']}:{'ok' if h['ok'] else 'FAIL'}" for h in STATE["history"][-5:]],
     }
 
 
@@ -619,9 +638,9 @@ def _device_probe(timeout: float = 3, serial: str | None = None) -> dict[str, An
     return probe
 
 
-@server.tool(description="Show pinned serial, current adb/fastboot mode, device lists and recent tool history.")
-def device_status() -> str:
-    return json.dumps(_device_status(), ensure_ascii=False)
+@server.tool(description="Quick device mode/serial summary. verbose=true adds full device lists and tool history.")
+def device_status(verbose: bool = False) -> str:
+    return json.dumps(_device_status(verbose), ensure_ascii=False)
 
 
 @server.tool(description="Quick parallel adb+fastboot probe with short timeouts. Reports state, per-transport errors/timings and last known mode.")

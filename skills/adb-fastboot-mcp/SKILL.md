@@ -16,7 +16,10 @@ is an argv list.
    transports' device lists, errors and timings, last known mode and a short hint.
    States: `adb`, `fastboot`, `adb_recovery`, `adb_unauthorized`, `adb_offline`,
    `mid_reboot_or_offline` (fastboot probe hung), `transport_error`, `no_device`.
-   `device_status` is the slower, fuller version with history.
+   `device_status` is the slower sibling; it returns a compact mode/serial
+   summary by default (pass `verbose:true` for full device lists and history).
+   Both keep the output small — the `…` in this client's output comes from
+   `JSON.stringify` wrapping the tool's JSON string, not from corruption.
 2. If several devices are attached, `set_target({serial})`. On X6739 the identity
    is serial `102562537K104189`; ignore reported model/fingerprint props.
 3. Read `/mnt/project/X6739/Status.md` and claim the device before touching adb;

@@ -64,7 +64,7 @@ Environment:
 
 | Tool | Purpose |
 |---|---|
-| `device_status` | pinned serial, current mode, both device lists, recent history |
+| `device_status` | compact mode/serial/device-state summary; `verbose=true` adds full lists and history |
 | `device_probe` | quick parallel adb+fastboot probe with short timeouts; state, per-transport errors, timings, hint |
 | `set_target` | pin a serial, or null for auto-select (only when one device is present) |
 | `adb_devices` / `fastboot_devices` | parsed device lists |
