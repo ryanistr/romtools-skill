@@ -522,6 +522,8 @@ STEP_TOOLS: dict[str, Any] = {
     "adb_logcat": lambda a: _adb_logcat(a.get("lines", 200), a.get("tag"), a.get("priority"), a.get("clear", False), a.get("serial"), a.get("timeout", DEFAULT_TIMEOUT)),
     "adb_reboot": lambda a: _adb_reboot(a.get("target", "android"), a.get("serial"), a.get("wait", True), a.get("timeout", 120), a.get("stable_for", 0)),
     "adb_file": lambda a: _adb_file(a.get("action", ""), a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
+    "adb_push": lambda a: _adb_file("push", a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
+    "adb_pull": lambda a: _adb_file("pull", a.get("local", "."), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
     "fastboot_getvar": lambda a: _fastboot_getvar(a.get("variable", "all"), a.get("serial"), a.get("timeout", 30)),
     "fastboot_flash": lambda a: _fastboot_flash(a.get("partition", ""), a.get("file_path", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 120)),
     "fastboot_erase": lambda a: _fastboot_erase(a.get("partition", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 60)),
@@ -670,6 +672,20 @@ def ui_click(text: str | None = None, resource_id: str | None = None, content_de
 def adb_file(action: str, local: str | None = None, remote: str | None = None, serial: str | None = None, timeout: float = 120) -> str:
     result = _adb_file(action, local, remote, serial, timeout)
     _record("adb_file", {"action": action}, result["ok"])
+    return json.dumps(result, ensure_ascii=False)
+
+
+@server.tool(description="adb push: copy a host file to a device path. Relative host paths resolve under ADB_FASTBOOT_WORKDIR.")
+def adb_push(local: str, remote: str, serial: str | None = None, timeout: float = 120) -> str:
+    result = _adb_file("push", local, remote, serial, timeout)
+    _record("adb_push", {"local": local, "remote": remote}, result["ok"])
+    return json.dumps(result, ensure_ascii=False)
+
+
+@server.tool(description="adb pull: copy a device path into a host directory (default: ADB_FASTBOOT_WORKDIR).")
+def adb_pull(remote: str, local: str = ".", serial: str | None = None, timeout: float = 120) -> str:
+    result = _adb_file("pull", local, remote, serial, timeout)
+    _record("adb_pull", {"local": local, "remote": remote}, result["ok"])
     return json.dumps(result, ensure_ascii=False)
 
 

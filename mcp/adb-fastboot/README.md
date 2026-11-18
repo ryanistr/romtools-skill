@@ -78,7 +78,9 @@ Environment:
 | `ui_dump` | uiautomator hierarchy as nodes with text, ids, clickable, tap centers |
 | `ui_input` | tap, swipe, long_press, text, key |
 | `ui_click` | find node by text/id/desc and tap its center in one call |
-| `adb_file` | `push`, `pull`, `install -r` |
+| `adb_push` | `adb push <local> <remote>`; relative host path resolves under `ADB_FASTBOOT_WORKDIR` |
+| `adb_pull` | `adb pull <remote> <local>`; local defaults to `ADB_FASTBOOT_WORKDIR` |
+| `adb_file` | `push`, `pull`, `install -r` (also usable in `run_steps`) |
 | `fastboot_getvar` | `getvar all` parsed into a dict |
 | `fastboot_flash` | flash a partition; dry-run unless `confirm=true` |
 | `fastboot_erase` | erase a partition; dry-run unless `confirm=true` |

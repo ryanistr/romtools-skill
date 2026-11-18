@@ -35,7 +35,9 @@ is an argv list.
 | Read the screen | `ui_dump({clickable_only})` — nodes with text, ids, tap centers |
 | Touch / type | `ui_input({action:"tap"\|"swipe"\|"long_press"\|"text"\|"key", x, y, x2, y2, duration, value})` |
 | Tap by label | `ui_click({text, resource_id, content_desc})` — dumps UI, matches, taps in one call |
-| Push/pull/install | `adb_file({action:"push"\|"pull"\|"install", local, remote})` |
+| Push a file | `adb_push({local, remote})` — relative host path under `ADB_FASTBOOT_WORKDIR` |
+| Pull a file | `adb_pull({remote, local})` — local defaults to `ADB_FASTBOOT_WORKDIR` |
+| Install an APK | `adb_file({action:"install", local})` |
 | Reboot out of Android | `adb_reboot({target:"android"\|"bootloader"\|"fastboot"\|"recovery"\|"edl", wait:true, stable_for:10})` |
 | Wait after a mode change | `wait_for_device({mode:"fastboot"\|"adb", timeout, stable_for})` |
 | Bootloader variables | `fastboot_getvar({variable:"all"})` |
