@@ -76,6 +76,56 @@ def _run(argv: list[str], timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     return result
 
 
+def _result_summary(result: dict[str, Any], kind: str = "generic", partition: str = "") -> str:
+    text = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if kind == "fastboot":
+        chunks = ""
+        for line in lines:
+            match = re.search(r"sparse '[^']+' (\d+)/(\d+)", line, re.IGNORECASE)
+            if match:
+                chunks = f"{match.group(1)}/{match.group(2)}"
+        duration = ""
+        match = re.search(r"Total time:\s*([0-9.]+)s", text)
+        if match:
+            duration = match.group(1)
+        failed = [line for line in lines if "FAILED" in line.upper() or line.lower().startswith("error")]
+        if not result.get("ok") or failed:
+            return "FAILED: " + ("; ".join(failed[-2:])[:200] or f"exit {result.get('exit_code')}")
+        parts = [partition or "fastboot"]
+        if chunks:
+            parts.append("sparse " + chunks)
+        if duration:
+            parts.append(duration + "s")
+        parts.append("OKAY")
+        return " ".join(parts)
+    if lines:
+        return " | ".join(lines[-2:])[:200]
+    return "ok" if result.get("ok") else f"exit {result.get('exit_code')}"
+
+
+def _compact(result: dict[str, Any], kind: str = "generic", partition: str = "", verbose: bool = False) -> dict[str, Any]:
+    if "confirm_required" in result or "executed" in result:
+        return result
+    compact: dict[str, Any] = {
+        "ok": bool(result.get("ok")),
+        "summary": _result_summary(result, kind, partition),
+        "elapsed_ms": result.get("elapsed_ms"),
+    }
+    if not compact["ok"] or verbose:
+        compact["exit_code"] = result.get("exit_code")
+        compact["command"] = result.get("command")
+        for key in ("stdout", "stderr"):
+            if result.get(key):
+                value = result[key]
+                compact[key] = value[:1200] + (f"\n... [clipped {len(value) - 1200} chars]" if len(value) > 1200 else "")
+    return compact
+
+
+def _compact_step(kind: str, result: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    return _compact(result, kind, args.get("partition", ""), args.get("verbose", False))
+
+
 def _record(tool: str, args: dict[str, Any], ok: bool) -> None:
     STATE["history"].append(
         {"tool": tool, "args": {k: v for k, v in args.items() if k != "confirm"}, "ok": ok, "at": int(time.time())}
@@ -521,14 +571,14 @@ STEP_TOOLS: dict[str, Any] = {
     "adb_shell": lambda a: _adb_shell(a.get("command", ""), a.get("su", False), a.get("serial"), a.get("timeout", DEFAULT_TIMEOUT)),
     "adb_logcat": lambda a: _adb_logcat(a.get("lines", 200), a.get("tag"), a.get("priority"), a.get("clear", False), a.get("serial"), a.get("timeout", DEFAULT_TIMEOUT)),
     "adb_reboot": lambda a: _adb_reboot(a.get("target", "android"), a.get("serial"), a.get("wait", True), a.get("timeout", 120), a.get("stable_for", 0)),
-    "adb_file": lambda a: _adb_file(a.get("action", ""), a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
-    "adb_push": lambda a: _adb_file("push", a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
-    "adb_pull": lambda a: _adb_file("pull", a.get("local", "."), a.get("remote"), a.get("serial"), a.get("timeout", 120)),
+    "adb_file": lambda a: _compact_step("generic", _adb_file(a.get("action", ""), a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)), a),
+    "adb_push": lambda a: _compact_step("generic", _adb_file("push", a.get("local"), a.get("remote"), a.get("serial"), a.get("timeout", 120)), a),
+    "adb_pull": lambda a: _compact_step("generic", _adb_file("pull", a.get("local", "."), a.get("remote"), a.get("serial"), a.get("timeout", 120)), a),
     "fastboot_getvar": lambda a: _fastboot_getvar(a.get("variable", "all"), a.get("serial"), a.get("timeout", 30)),
-    "fastboot_flash": lambda a: _fastboot_flash(a.get("partition", ""), a.get("file_path", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 120)),
-    "fastboot_erase": lambda a: _fastboot_erase(a.get("partition", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 60)),
+    "fastboot_flash": lambda a: _compact_step("fastboot", _fastboot_flash(a.get("partition", ""), a.get("file_path", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 120)), a),
+    "fastboot_erase": lambda a: _compact_step("fastboot", _fastboot_erase(a.get("partition", ""), a.get("serial"), a.get("confirm", False), a.get("timeout", 60)), a),
     "fastboot_reboot": lambda a: _fastboot_reboot(a.get("target", ""), a.get("serial"), a.get("wait", False), a.get("timeout", 120)),
-    "fastboot_raw": lambda a: _fastboot_raw(a.get("args", []), a.get("serial"), a.get("confirm", False), a.get("timeout", 60)),
+    "fastboot_raw": lambda a: _compact_step("fastboot", _fastboot_raw(a.get("args", []), a.get("serial"), a.get("confirm", False), a.get("timeout", 60)), a),
     "wait_for_device": lambda a: _wait_for_mode(a.get("mode", "fastboot"), a.get("serial"), a.get("timeout", 120), a.get("interval", 2), a.get("stable_for", 0)),
 }
 
@@ -668,25 +718,25 @@ def ui_click(text: str | None = None, resource_id: str | None = None, content_de
     return json.dumps(result, ensure_ascii=False)
 
 
-@server.tool(description="adb push / pull / install -r. local is a host path, remote is a device path.")
-def adb_file(action: str, local: str | None = None, remote: str | None = None, serial: str | None = None, timeout: float = 120) -> str:
+@server.tool(description="adb push / pull / install -r. Returns a short summary; verbose=true adds raw output.")
+def adb_file(action: str, local: str | None = None, remote: str | None = None, serial: str | None = None, timeout: float = 120, verbose: bool = False) -> str:
     result = _adb_file(action, local, remote, serial, timeout)
     _record("adb_file", {"action": action}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "generic", "", verbose), ensure_ascii=False)
 
 
-@server.tool(description="adb push: copy a host file to a device path. Relative host paths resolve under ADB_FASTBOOT_WORKDIR.")
-def adb_push(local: str, remote: str, serial: str | None = None, timeout: float = 120) -> str:
+@server.tool(description="adb push: copy a host file to a device path. Short summary; verbose=true adds raw output.")
+def adb_push(local: str, remote: str, serial: str | None = None, timeout: float = 120, verbose: bool = False) -> str:
     result = _adb_file("push", local, remote, serial, timeout)
     _record("adb_push", {"local": local, "remote": remote}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "generic", "", verbose), ensure_ascii=False)
 
 
-@server.tool(description="adb pull: copy a device path into a host directory (default: ADB_FASTBOOT_WORKDIR).")
-def adb_pull(remote: str, local: str = ".", serial: str | None = None, timeout: float = 120) -> str:
+@server.tool(description="adb pull: copy a device path into a host directory (default: ADB_FASTBOOT_WORKDIR). Short summary; verbose=true adds raw output.")
+def adb_pull(remote: str, local: str = ".", serial: str | None = None, timeout: float = 120, verbose: bool = False) -> str:
     result = _adb_file("pull", local, remote, serial, timeout)
     _record("adb_pull", {"local": local, "remote": remote}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "generic", "", verbose), ensure_ascii=False)
 
 
 @server.tool(description="Read fastboot variables. variable='all' returns a parsed dict of bootloader values.")
@@ -694,18 +744,18 @@ def fastboot_getvar(variable: str = "all", serial: str | None = None, timeout: f
     return json.dumps(_fastboot_getvar(variable, serial, timeout), ensure_ascii=False)
 
 
-@server.tool(description="Flash an image. Dry-run by default; set confirm=true to execute.")
-def fastboot_flash(partition: str, file_path: str, serial: str | None = None, confirm: bool = False, timeout: float = 120) -> str:
+@server.tool(description="Flash an image. Dry-run by default; confirm=true executes. Returns 'partition sparse N/M TIME OKAY'; verbose=true adds raw output.")
+def fastboot_flash(partition: str, file_path: str, serial: str | None = None, confirm: bool = False, timeout: float = 120, verbose: bool = False) -> str:
     result = _fastboot_flash(partition, file_path, serial, confirm, timeout)
     _record("fastboot_flash", {"partition": partition, "file_path": file_path, "confirm": confirm}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "fastboot", partition, verbose), ensure_ascii=False)
 
 
-@server.tool(description="Erase a partition. Dry-run by default; set confirm=true to execute.")
-def fastboot_erase(partition: str, serial: str | None = None, confirm: bool = False, timeout: float = 60) -> str:
+@server.tool(description="Erase a partition. Dry-run by default; confirm=true executes. Returns a short summary; verbose=true adds raw output.")
+def fastboot_erase(partition: str, serial: str | None = None, confirm: bool = False, timeout: float = 60, verbose: bool = False) -> str:
     result = _fastboot_erase(partition, serial, confirm, timeout)
     _record("fastboot_erase", {"partition": partition, "confirm": confirm}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "fastboot", partition, verbose), ensure_ascii=False)
 
 
 @server.tool(description="Reboot out of fastboot. target='' or 'android' returns to Android; 'bootloader' stays in fastboot.")
@@ -715,11 +765,11 @@ def fastboot_reboot(target: str = "", serial: str | None = None, wait: bool = Fa
     return json.dumps(result, ensure_ascii=False)
 
 
-@server.tool(description="Run any other fastboot subcommand with argv tokens. Destructive subcommands require confirm=true.")
-def fastboot_raw(args: list[str], serial: str | None = None, confirm: bool = False, timeout: float = 60) -> str:
+@server.tool(description="Run any other fastboot subcommand with argv tokens. Destructive subcommands require confirm=true. Short summary; verbose=true adds raw output.")
+def fastboot_raw(args: list[str], serial: str | None = None, confirm: bool = False, timeout: float = 60, verbose: bool = False) -> str:
     result = _fastboot_raw(args, serial, confirm, timeout)
     _record("fastboot_raw", {"args": args, "confirm": confirm}, result["ok"])
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(_compact(result, "fastboot", "", verbose), ensure_ascii=False)
 
 
 @server.tool(description="Execute a chain of steps in one call, spanning adb and fastboot. Each step is {tool, args, label?}. Returns per-step results.")

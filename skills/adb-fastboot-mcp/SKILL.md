@@ -88,7 +88,8 @@ authorized the flash.
   `[A-Za-z0-9_.-]+`. If `ADB_FASTBOOT_FLASH_DIRS` is set, paths outside it are
   rejected before execution.
 - With multiple devices and no pinned serial, tools error rather than guess.
-- Output is clipped (12 KB per call, 2 KB per chain step) to keep token use low.
+- Flash/erase/push/pull results are compact: `summary` like `vendor sparse 5/5 31.671s OKAY`, plus `ok` and `elapsed_ms`. Add `verbose:true` only when raw output is needed; failures always include the error tail. `run_steps` compacts each step the same way. Log tools (`adb_logcat`, `dmesg`, `dumpsys`, `ui_dump`) keep full output.
+- Other output is clipped (12 KB per call, 2 KB per chain step) to keep token use low.
 
 ## Verify the MCP itself
 

@@ -93,6 +93,16 @@ device is auto-selected. With several devices and no pin, the tool errors with
 the list instead of guessing. Destructive fastboot calls return a `would_run`
 preview by default.
 
+## Concise results
+
+`fastboot_flash`, `fastboot_erase`, `fastboot_raw`, `adb_push`, `adb_pull` and
+`adb_file` return a short `summary` instead of the raw progress log, e.g.
+`vendor sparse 5/5 31.671s OKAY`, plus `ok` and `elapsed_ms`. Pass
+`verbose=true` to include the clipped raw stdout/stderr; failures always include
+the raw tail and command. `run_steps` applies the same compaction per step.
+Log-producing tools (`adb_logcat`, `dmesg`, `dumpsys`, `ui_dump`) keep their full
+output — that output is the result.
+
 ## Registered with these agents
 
 MCP server entry (`adb-fastboot`) is installed in:
