@@ -31,6 +31,32 @@ Each step runs as a separate `subprocess` argv (never a shell string), returns
 a structured result, and `adb_reboot` / `wait_for_device` poll both `adb devices`
 and `fastboot devices` so a mode transition is handled in one call.
 
+## Target-aware waits
+
+`adb_reboot(wait:true)` waits for the **target mode**, not always fastboot:
+
+- `android` → `adb`
+- `recovery` → `adb_recovery` (adb device in `recovery`/`sideload`)
+- `fastboot`, `fastbootd`, `bootloader` → `fastboot`
+- `edl` → `offline`
+
+`wait_for_device` accepts `adb_recovery` too. `stable_for` is measured as real
+**seconds** the observed state persists, not a poll count, so a slow 10 s probe
+does not silently become a 50 s wait.
+
+## Known fastboot red herrings (auto-retried)
+
+These messages are host/AVB bugs, not real flash failures:
+
+- `image too large` — fastbootd resizes the logical partition on-device.
+- mangled `*_yes` / `unknown command ... yes` — AVB metadata corrupting the command.
+
+`fastboot_flash` (and `fastboot_raw` with `flash`) re-run the flash up to 3
+attempts when either pattern appears. The returned result includes
+`red_herring_retry` with the attempt count, matched pattern and first error;
+a failure after all retries is reported as a genuine failure. **Do not manually
+resize partitions or report these as failures before the retries are exhausted.**
+
 ## Install / run
 
 ```sh

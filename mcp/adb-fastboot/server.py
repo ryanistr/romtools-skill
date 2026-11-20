@@ -32,7 +32,13 @@ server = MCPServer(
     name="adb-fastboot",
     title="ADB / Fastboot device control",
     description="Structured adb and fastboot tools with chained steps across reboot modes.",
-    instructions="Use device_status first. For reboot chains use run_steps with explicit wait_for_device steps.",
+    instructions=(
+        "Use device_status first. For reboot chains use run_steps with explicit wait_for_device steps. "
+        "Reboot waits are target-aware: recovery waits for adb_recovery, not fastboot. "
+        "fastboot 'image too large' and mangled *_yes / AVB command errors are known red herrings: "
+        "flash tools retry automatically (fastbootd resizes on-device). Do not report these as real failures or manually resize; "
+        "only a failure after all retries is genuine."
+    ),
 )
 
 PARTITION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -247,31 +253,70 @@ def _detect(serial: str | None = None) -> dict[str, Any]:
         mode = "adb"
     else:
         mode = "offline"
-    snapshot = {"mode": mode, "adb": adb_devs, "fastboot": fb_devs}
+    snapshot = {
+        "mode": mode,
+        "state": probe["state"],
+        "adb": adb_devs,
+        "fastboot": fb_devs,
+        "adb_states": sorted({d["state"] for d in adb_devs}),
+    }
     if mode != "offline":
         STATE["last_mode"] = mode
     return snapshot
 
 
+def _mode_matches(snapshot: dict[str, Any], mode: str) -> bool:
+    """Match a requested wait mode against a device snapshot.
+
+    adb recovery/sideload is its own observable state; waiting for 'adb' still
+    accepts it for backward compatibility, but waiting for 'adb_recovery' does
+    not accept a device still in normal android.
+    """
+    if mode == "fastboot":
+        return bool(snapshot["fastboot"]) or snapshot["mode"] == "fastboot"
+    if mode == "adb":
+        return snapshot["mode"] == "adb"
+    if mode == "adb_recovery":
+        return snapshot["state"] == "adb_recovery" or bool(
+            set(snapshot["adb_states"]) & {"recovery", "sideload"}
+        )
+    if mode == "offline":
+        return snapshot["mode"] == "offline"
+    return False
+
+
 def _wait_for_mode(
     mode: str, serial: str | None = None, timeout: float = 120, interval: float = 2, stable_for: float = 0
 ) -> dict[str, Any]:
+    if mode not in ("adb", "adb_recovery", "fastboot", "offline"):
+        raise ToolError(f"unknown wait mode {mode!r}; use adb, adb_recovery, fastboot or offline")
     deadline = time.monotonic() + timeout
-    required = max(1, math.ceil(stable_for / interval)) if stable_for else 1
-    hits = 0
-    last = {"mode": "offline", "adb": [], "fastboot": []}
+    stable_since = None
+    stable_secs = 0.0
+    last = {"mode": "offline", "state": "no_device", "adb": [], "fastboot": [], "adb_states": []}
     while True:
+        observed_at = time.monotonic()
         last = _detect(serial)
-        if last["mode"] == mode:
-            hits += 1
-            if hits >= required:
-                return {"ok": True, "mode": mode, "stable_polls": hits, "device": last}
+        if _mode_matches(last, mode):
+            if stable_since is None:
+                stable_since = observed_at
+            stable_secs = time.monotonic() - stable_since
+            if stable_secs >= stable_for:
+                return {
+                    "ok": True,
+                    "mode": mode,
+                    "stable_secs": round(stable_secs, 2),
+                    "observed_state": last["state"],
+                    "device": last,
+                }
         else:
-            hits = 0
+            stable_since = None
+            stable_secs = 0.0
         if time.monotonic() >= deadline:
             return {
                 "ok": False,
-                "error": f"device did not reach {mode} within {timeout}s",
+                "error": f"device did not reach {mode} within {timeout}s (last state: {last['state']})",
+                "observed_state": last["state"],
                 "device": last,
             }
         time.sleep(interval)
@@ -300,7 +345,14 @@ def _adb_reboot(
         return result
     STATE["last_mode"] = None
     if wait:
-        expected = "adb" if target == "android" else "fastboot"
+        expected = {
+            "android": "adb",
+            "recovery": "adb_recovery",
+            "fastboot": "fastboot",
+            "fastbootd": "fastboot",
+            "bootloader": "fastboot",
+            "edl": "offline",
+        }[target]
         waited = _wait_for_mode(expected, s, timeout=timeout, stable_for=stable_for)
         result["wait"] = waited
         result["ok"] = waited["ok"]
@@ -381,6 +433,38 @@ def _flash_path(file_path: str) -> str:
     return path
 
 
+# Known fastboot/fastbootd red herrings. These are host/AVB bugs, not real
+# failures: fastbootd resizes the target on-device, and a mangled *_yes command
+# comes from AVB metadata, not from the partition being flashed.
+FASTBOOT_RED_HERRINGS = [
+    r"image\s+(?:is\s+)?too\s+large",
+    r"\b[a-z0-9]+_yes\b",
+    r"unknown\s+command[^\n]*\byes\b",
+    r"\byes\b[^\n]*(?:avb|mangl)",
+]
+
+
+def _fastboot_red_herring(result: dict[str, Any]) -> list[str]:
+    text = (result.get("stdout") or "") + "\n" + (result.get("stderr") or "")
+    return [p for p in FASTBOOT_RED_HERRINGS if re.search(p, text, re.IGNORECASE)]
+
+
+def _run_flash_with_retry(argv: list[str], timeout: float, retries: int = 2) -> dict[str, Any]:
+    result = _run(argv, timeout=timeout)
+    attempts = [result]
+    while not result["ok"] and _fastboot_red_herring(result) and len(attempts) <= retries:
+        result = _run(argv, timeout=timeout)
+        attempts.append(result)
+    if len(attempts) > 1:
+        result["red_herring_retry"] = {
+            "attempts": len(attempts),
+            "patterns": _fastboot_red_herring(attempts[0]),
+            "first_error": _result_summary(attempts[0], "fastboot", "flash"),
+            "final_ok": result["ok"],
+        }
+    return result
+
+
 def _fastboot_flash(
     partition: str, file_path: str, serial: str | None = None, confirm: bool = False, timeout: float = 120
 ) -> dict[str, Any]:
@@ -391,7 +475,9 @@ def _fastboot_flash(
     argv = [FASTBOOT, "-s", s, "flash", partition, path]
     if not confirm:
         return {"ok": False, "executed": False, "confirm_required": True, "would_run": shlex.join(argv)}
-    return _run([FASTBOOT, "-s", _resolve_serial(serial, mode="fastboot"), "flash", partition, path], timeout=timeout)
+    return _run_flash_with_retry(
+        [FASTBOOT, "-s", _resolve_serial(serial, mode="fastboot"), "flash", partition, path], timeout=timeout
+    )
 
 
 def _fastboot_erase(partition: str, serial: str | None = None, confirm: bool = False, timeout: float = 60) -> dict[str, Any]:
@@ -432,7 +518,16 @@ def _fastboot_reboot(
     if result["ok"]:
         STATE["last_mode"] = None
     if result["ok"] and wait:
-        waited = _wait_for_mode("adb" if target in ("", "android") else "fastboot", s, timeout=timeout)
+        expected = {
+            "": "adb",
+            "android": "adb",
+            "recovery": "adb_recovery",
+            "fastboot": "fastboot",
+            "fastbootd": "fastboot",
+            "bootloader": "fastboot",
+            "edl": "offline",
+        }[target]
+        waited = _wait_for_mode(expected, s, timeout=timeout)
         result["wait"] = waited
         result["ok"] = waited["ok"]
     result["serial"] = s
@@ -451,7 +546,10 @@ def _fastboot_raw(args: list[str], serial: str | None = None, confirm: bool = Fa
             "would_run": shlex.join([FASTBOOT, *args]),
         }
     s = _resolve_serial(serial, mode="fastboot")
-    return _run([FASTBOOT, "-s", s, *args], timeout=timeout)
+    argv = [FASTBOOT, "-s", s, *args]
+    if args[0] == "flash":
+        return _run_flash_with_retry(argv, timeout=timeout)
+    return _run(argv, timeout=timeout)
 
 
 KEY_CODES = {
@@ -664,16 +762,16 @@ def fastboot_devices() -> str:
     return json.dumps({"devices": _list_fastboot()}, ensure_ascii=False)
 
 
-@server.tool(description="Wait until the device appears in adb or fastboot mode. Polls both, so it spans reboot transitions.")
+@server.tool(description="Wait for mode: adb (android), adb_recovery (adb in recovery/sideload), fastboot, or offline. stable_for is seconds the observed state must persist.")
 def wait_for_device(mode: str = "fastboot", serial: str | None = None, timeout: float = 120, interval: float = 2, stable_for: float = 0) -> str:
-    if mode not in ("adb", "fastboot", "offline"):
-        raise ToolError("mode must be adb, fastboot or offline")
+    if mode not in ("adb", "adb_recovery", "fastboot", "offline"):
+        raise ToolError("mode must be adb, adb_recovery, fastboot or offline")
     result = _wait_for_mode(mode, serial, timeout, interval, stable_for)
     _record("wait_for_device", {"mode": mode, "stable_for": stable_for}, result["ok"])
     return json.dumps(result, ensure_ascii=False)
 
 
-@server.tool(description="Reboot an adb device to android, bootloader, fastboot, recovery or edl; optionally wait for the target mode.")
+@server.tool(description="Reboot an adb device to android, bootloader, fastboot, recovery or edl. wait=true waits for the correct target mode (recovery -> adb_recovery, not fastboot)." )
 def adb_reboot(target: str = "android", serial: str | None = None, wait: bool = True, timeout: float = 120, stable_for: float = 0) -> str:
     result = _adb_reboot(target, serial, wait, timeout, stable_for)
     _record("adb_reboot", {"target": target}, result["ok"])
